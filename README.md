@@ -6,7 +6,7 @@ passively scans for several AC Infinity CloudCom A1 devices at once and
 cycles the display through each one every 5 seconds, showing temperature,
 humidity, VPD (vapor pressure deficit), battery level, and the device's
 own name -- no phone, computer, or BLE dongle needed. Press the leftmost
-button to see a graph of the last hour of temperature history for
+button to see a graph of the last 24 hours of temperature history for
 whichever device is on screen.
 
 Ported from [lilygo-ac-infinity-monitor](https://github.com/jtorsek/lilygo-ac-infinity-monitor)
@@ -39,17 +39,23 @@ add a line here, and reflash -- no other code changes needed.
 
 - **Button A** (leftmost): toggle the history graph for whichever device
   is currently on screen. Live cycling pauses while the graph is open.
-- **Button B / C** (while the graph is open): step to the previous/next
-  device's history without leaving graph mode.
+- **Button B / C**: step to the previous/next device -- works in both live
+  view (picking one manually pauses the 5-second auto-cycling until you
+  let it run again) and in graph mode (switches whose history is plotted).
 - **Button A** again: back to live cycling.
 
 ## History graph
 
 Each device gets its own ring buffer of one temperature sample per minute,
-holding the last 60 samples (one hour). There's no SD card on this board,
-so history is RAM-only and doesn't survive a reboot -- it starts filling
-in again from scratch each time the board powers on, and the graph shows
-"Not enough history yet" until at least two samples have been recorded.
+holding the last 1440 samples (24 hours). At 4 bytes/sample that's under
+6KB of RAM per device -- negligible next to the M5Stack Core's 512KB, so
+there's no need to spill this onto the SD card even with several devices
+configured. It is RAM-only, though, so it doesn't survive a reboot -- it
+starts filling in again from scratch each time the board powers on, and
+the graph shows "Not enough history yet" until at least two samples have
+been recorded. The plotted line is downsampled to one point per pixel
+column, so it stays fast and legible regardless of how many samples are
+buffered.
 
 ## Display cycling (live view)
 

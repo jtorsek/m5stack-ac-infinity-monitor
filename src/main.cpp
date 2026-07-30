@@ -10,12 +10,15 @@
  *
  *   - Button A (leftmost): toggle the history graph for whichever device
  *     is currently on screen. Live cycling pauses while the graph is up.
- *   - Button B / C (while in graph mode): step to the previous/next
- *     device's history without leaving graph mode.
+ *   - Button B / C: step to the previous/next device -- in both live view
+ *     (pauses auto-cycling once you've picked one manually) and in graph
+ *     mode (switches whose history is plotted).
  *
  * History is a 1-sample-per-minute ring buffer per device, holding the
- * last hour (60 points) in RAM -- there's no SD card slot on this board,
- * so history doesn't survive a reboot.
+ * last 24 hours (1440 points) in RAM -- at 4 bytes/sample that's under
+ * 6KB per device, negligible next to the M5Stack Core's 512KB of RAM, so
+ * there's no need to spill this onto the SD card. It doesn't survive a
+ * reboot, though (RAM only).
  *
  * Ported from https://github.com/jtorsek/lilygo-ac-infinity-monitor --
  * same decode formulas, same devices.h format. See that repo's README for
@@ -134,15 +137,15 @@ class AcInfinityScanCallbacks : public NimBLEScanCallbacks {
 } g_scanCallbacks;
 
 // ---------------------------------------------------------------------
-// History -- last hour of temperature, one sample per minute, per device.
+// History -- last 24 hours of temperature, one sample per minute, per device.
 // ---------------------------------------------------------------------
-static const size_t HISTORY_SIZE = 60;
+static const size_t HISTORY_SIZE = 24 * 60;
 static const uint32_t HISTORY_INTERVAL_MS = 60UL * 1000UL;
 
 struct History {
     float samples[HISTORY_SIZE];
-    uint8_t count = 0; // valid samples so far, caps at HISTORY_SIZE
-    uint8_t head = 0;  // index the next sample will be written to
+    uint16_t count = 0; // valid samples so far, caps at HISTORY_SIZE
+    uint16_t head = 0;  // index the next sample will be written to
 };
 static History g_history[KNOWN_DEVICE_COUNT];
 static uint32_t g_lastHistoryRecordMs = 0;
@@ -244,7 +247,7 @@ static void renderLive() {
     M5.Lcd.setTextColor(DARKGREY, BLACK);
     M5.Lcd.setTextFont(1);
     M5.Lcd.setCursor(6, 224);
-    M5.Lcd.print("A: history graph");
+    M5.Lcd.print("A: history graph   B/C: select sensor");
 }
 
 static void renderGraph() {
@@ -258,9 +261,9 @@ static void renderGraph() {
     M5.Lcd.print(device.name);
     M5.Lcd.setTextColor(DARKGREY, BLACK);
     M5.Lcd.setCursor(6, 24);
-    M5.Lcd.print("Temperature, last hour");
+    M5.Lcd.print("Temperature, last 24 hours");
 
-    const int plotX = 40, plotY = 46, plotW = 270, plotH = 150;
+    const int plotX = 40, plotY = 46, plotW = 270, plotH = 140;
     M5.Lcd.drawRect(plotX, plotY, plotW, plotH, DARKGREY);
 
     if (h.count < 2) {
@@ -270,8 +273,8 @@ static void renderGraph() {
         M5.Lcd.print("Not enough history yet");
     } else {
         float minT = 1000, maxT = -1000;
-        for (uint8_t i = 0; i < h.count; i++) {
-            size_t idx = (h.head + HISTORY_SIZE - h.count + i) % HISTORY_SIZE;
+        for (uint16_t i = 0; i < h.count; i++) {
+            uint16_t idx = (h.head + HISTORY_SIZE - h.count + i) % HISTORY_SIZE;
             float v = h.samples[idx];
             if (v < minT) minT = v;
             if (v > maxT) maxT = v;
@@ -292,11 +295,15 @@ static void renderGraph() {
         M5.Lcd.setCursor(2, plotY + plotH - 8);
         M5.Lcd.print(buf);
 
+        // Downsample to one point per pixel column so plotting stays fast
+        // and legible regardless of how many samples are buffered (up to
+        // HISTORY_SIZE for a full 24h at 1-minute resolution).
         int prevX = -1, prevY = -1;
-        for (uint8_t i = 0; i < h.count; i++) {
-            size_t idx = (h.head + HISTORY_SIZE - h.count + i) % HISTORY_SIZE;
+        for (int col = 0; col < plotW; col++) {
+            uint16_t sampleIdx = (uint32_t)col * (h.count - 1) / (plotW - 1);
+            uint16_t idx = (h.head + HISTORY_SIZE - h.count + sampleIdx) % HISTORY_SIZE;
             float v = h.samples[idx];
-            int x = plotX + (int)((float)i / (float)(h.count - 1) * plotW);
+            int x = plotX + col;
             int y = plotY + plotH - (int)((v - minT) / (maxT - minT) * plotH);
             if (prevX >= 0) {
                 M5.Lcd.drawLine(prevX, prevY, x, y, GREEN);
@@ -308,6 +315,13 @@ static void renderGraph() {
 
     M5.Lcd.setTextColor(DARKGREY, BLACK);
     M5.Lcd.setTextFont(1);
+    M5.Lcd.setCursor(plotX, plotY + plotH + 4);
+    M5.Lcd.print("-24h");
+    const char *nowLabel = "now";
+    int nowWidth = M5.Lcd.textWidth(nowLabel);
+    M5.Lcd.setCursor(plotX + plotW - nowWidth, plotY + plotH + 4);
+    M5.Lcd.print(nowLabel);
+
     M5.Lcd.setCursor(6, 224);
     M5.Lcd.print("A: back   B: prev device   C: next device");
 }
@@ -393,15 +407,23 @@ void loop() {
         }
     }
 
-    if (g_graphMode) {
-        if (M5.BtnB.wasPressed()) {
+    if (M5.BtnB.wasPressed()) {
+        if (g_graphMode) {
             g_graphIndex = (g_graphIndex + KNOWN_DEVICE_COUNT - 1) % KNOWN_DEVICE_COUNT;
-            needsRedraw = true;
+        } else {
+            g_displayIndex = (g_displayIndex + KNOWN_DEVICE_COUNT - 1) % KNOWN_DEVICE_COUNT;
+            g_displaySwitchedAtMs = millis(); // manual pick -- restart the auto-cycle countdown
         }
-        if (M5.BtnC.wasPressed()) {
+        needsRedraw = true;
+    }
+    if (M5.BtnC.wasPressed()) {
+        if (g_graphMode) {
             g_graphIndex = (g_graphIndex + 1) % KNOWN_DEVICE_COUNT;
-            needsRedraw = true;
+        } else {
+            g_displayIndex = (g_displayIndex + 1) % KNOWN_DEVICE_COUNT;
+            g_displaySwitchedAtMs = millis();
         }
+        needsRedraw = true;
     }
 
     if (!g_graphMode && millis() - g_displaySwitchedAtMs > DISPLAY_CYCLE_MS) {
