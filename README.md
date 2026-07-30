@@ -1,0 +1,101 @@
+# M5Stack Core -- Multi-Device AC Infinity CloudCom Monitor
+
+Standalone PlatformIO firmware for the M5Stack Core (classic ESP32,
+ILI9341 320x240 screen, three physical buttons). Once flashed, the board
+passively scans for several AC Infinity CloudCom A1 devices at once and
+cycles the display through each one every 5 seconds, showing temperature,
+humidity, VPD (vapor pressure deficit), battery level, and the device's
+own name -- no phone, computer, or BLE dongle needed. Press the leftmost
+button to see a graph of the last hour of temperature history for
+whichever device is on screen.
+
+Ported from [lilygo-ac-infinity-monitor](https://github.com/jtorsek/lilygo-ac-infinity-monitor)
+(same feature set on a LilyGo T-Display S3) -- same decode logic, same
+`devices.h` format, adapted here for the M5Stack Core's screen/button
+hardware and extended with the history graph. Both share the decode logic
+originally ported from the Python scanner in
+[ac-infinity-bleuio](https://github.com/jtorsek/ac-infinity-bleuio) (full
+write-up on how the temperature/humidity/VPD formulas were field-verified
+lives there).
+
+## Configuring your devices
+
+Devices are listed in `include/devices.h`:
+
+```cpp
+static const KnownDevice KNOWN_DEVICES[] = {
+    {"a4:c1:38:8e:05:33", 0, "Not Used"},
+    {"a4:c1:38:82:a3:9a", 0, "Sniffer -Bleu.io"},
+    {"a4:c1:38:0f:7f:15", 0, "Kontoret"},
+    {"a4:c1:38:33:f5:be", 0, "Kylskapet"},
+};
+```
+
+To add a new device, find its MAC address with
+`ac_infinity_bleuio_scanner.py --watch` from the ac-infinity-bleuio repo,
+add a line here, and reflash -- no other code changes needed.
+
+## Controls
+
+- **Button A** (leftmost): toggle the history graph for whichever device
+  is currently on screen. Live cycling pauses while the graph is open.
+- **Button B / C** (while the graph is open): step to the previous/next
+  device's history without leaving graph mode.
+- **Button A** again: back to live cycling.
+
+## History graph
+
+Each device gets its own ring buffer of one temperature sample per minute,
+holding the last 60 samples (one hour). There's no SD card on this board,
+so history is RAM-only and doesn't survive a reboot -- it starts filling
+in again from scratch each time the board powers on, and the graph shows
+"Not enough history yet" until at least two samples have been recorded.
+
+## Display cycling (live view)
+
+- Each configured device gets 5 seconds on screen before the display moves
+  to the next one, showing the device's name, its position in the
+  rotation (e.g. `(2/4)`), and its latest reading.
+- A device that hasn't been heard from yet shows "Waiting for signal...".
+- A device that was seen before but hasn't advertised in the last 10
+  seconds shows "Lost signal, retrying..." -- this is purely a per-device
+  display state; the scan itself keeps running continuously for all
+  devices in the background.
+
+## Build and flash
+
+```bash
+pio run --target upload
+```
+
+## Requirements
+
+- [PlatformIO](https://platformio.org/)
+- An M5Stack Core (Basic/Gray/Fire/Core ESP32-16M -- any variant with the
+  classic 3-button, ILI9341 320x240 form factor)
+- One or more AC Infinity CloudCom A1 devices (or others using the same
+  "C_1B" advertisement layout) within BLE range
+
+## Protocol notes
+
+Temperature, humidity, and VPD formulas are ported from
+`decode_c1_mini_device()` and `compute_vpd_kpa()` in
+`ac_infinity_bleuio_scanner.py` (ac-infinity-bleuio repo):
+
+- Temperature: `temp_C = 1.6 * byte15 + 0.6`, accurate to ~1 degree C.
+- Humidity: `hum_pct = 0.1065 * byte17 + 24.46`, accurate to ~0.7% RH.
+- VPD: the same Tetens-equation formula AC Infinity's own app uses, with a
+  leaf-temperature offset of 0.
+
+See the ac-infinity-bleuio repo's `ac_infinity_bleuio_scanner.py`
+docstring for the full field data and known caveats.
+
+## Battery level
+
+Unlike temperature/humidity/VPD, battery level isn't part of the passive
+advertisement -- each CloudCom A1 exposes it as a standard Bluetooth SIG
+Battery Service (`0x180F`) / Battery Level characteristic (`0x2A19`).
+Reading it needs an actual GATT connection, so the firmware briefly stops
+its passive scan, connects to one device, reads the value, disconnects,
+and resumes scanning -- one device at a time, round robin, every 5
+minutes.
