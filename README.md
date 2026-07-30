@@ -60,6 +60,13 @@ not treated as an error. If `HISTORY_SIZE` ever changes in a future
 firmware update, old files from a different size are detected (via a
 header written alongside the data) and ignored rather than misread.
 
+M5's own `M5.begin()` already tries `SD.begin()` once at a fixed 40MHz,
+which some cards/wiring can't sustain reliably -- on real hardware this
+showed up as `f_mount failed: (1) A hard error occurred in the low level
+disk I/O layer` even with a correctly FAT32-formatted card. The firmware
+retries once at the SD library's conservative default speed (4MHz)
+before giving up and falling back to RAM-only.
+
 The plotted line is downsampled to one point per pixel column, so it
 stays fast and legible regardless of how many samples are buffered.
 

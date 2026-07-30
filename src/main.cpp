@@ -466,6 +466,16 @@ void setup() {
     }
 
     g_sdReady = SD.cardType() != CARD_NONE;
+    if (!g_sdReady) {
+        // M5.begin() already tried SD.begin() at a fixed 40MHz, which some
+        // cards/wiring can't sustain reliably (shows up as a low-level disk
+        // I/O error even on a correctly FAT32-formatted card). Retry once
+        // at the SD library's conservative default (4MHz) before giving up.
+        Serial.println("Retrying SD card at a lower SPI speed...");
+        SD.end();
+        delay(50);
+        g_sdReady = SD.begin(TFCARD_CS_PIN) && SD.cardType() != CARD_NONE;
+    }
     if (g_sdReady) {
         Serial.println("SD card present -- history will persist across reboots");
         for (size_t i = 0; i < KNOWN_DEVICE_COUNT; i++) {
