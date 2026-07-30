@@ -15,10 +15,12 @@
  *     mode (switches whose history is plotted).
  *
  * History is a 1-sample-per-minute ring buffer per device, holding the
- * last 24 hours (1440 points) in RAM -- at 4 bytes/sample that's under
- * 6KB per device, negligible next to the M5Stack Core's 512KB of RAM, so
- * there's no need to spill this onto the SD card. It doesn't survive a
- * reboot, though (RAM only).
+ * last 24 hours (1440 points). It lives in RAM but is mirrored to the SD
+ * card (one file per device, keyed by MAC address) after every new
+ * sample, and reloaded from there at boot -- so a reboot or power cycle
+ * doesn't lose it. If no SD card is present, the firmware just runs with
+ * RAM-only history for that session (logged once at boot, not treated as
+ * an error).
  *
  * Ported from https://github.com/jtorsek/lilygo-ac-infinity-monitor --
  * same decode formulas, same devices.h format. See that repo's README for
@@ -27,6 +29,7 @@
 
 #include <M5Stack.h>
 #include <NimBLEDevice.h>
+#include <SD.h>
 #include <math.h>
 #include "devices.h"
 
@@ -150,6 +153,91 @@ struct History {
 static History g_history[KNOWN_DEVICE_COUNT];
 static uint32_t g_lastHistoryRecordMs = 0;
 
+// ---------------------------------------------------------------------
+// SD card persistence -- one file per device (named after its MAC, since
+// devices.h entries can be reordered/added), holding a small header plus
+// the raw History contents. Written after every new sample and reloaded
+// at boot, so history survives a reboot/power cycle.
+// ---------------------------------------------------------------------
+static bool g_sdReady = false;
+static const uint32_t HISTORY_FILE_MAGIC = 0x48434941; // "AICH" -- AC Infinity/M5 history
+static const uint16_t HISTORY_FILE_VERSION = 1;
+
+static String historyFilePath(size_t idx) {
+    String path = "/hist_";
+    for (const char *p = KNOWN_DEVICES[idx].mac; *p; p++) {
+        if (*p != ':') {
+            path += *p;
+        }
+    }
+    path += ".bin";
+    return path;
+}
+
+static void saveHistoryToSd(size_t idx) {
+    if (!g_sdReady) {
+        return;
+    }
+    String path = historyFilePath(idx);
+    SD.remove(path); // FILE_WRITE appends rather than truncates -- remove first for a clean overwrite
+    File f = SD.open(path, FILE_WRITE);
+    if (!f) {
+        Serial.printf("Failed to open %s for writing\n", path.c_str());
+        return;
+    }
+    const History &h = g_history[idx];
+    uint16_t size = HISTORY_SIZE;
+    f.write((const uint8_t *)&HISTORY_FILE_MAGIC, sizeof(HISTORY_FILE_MAGIC));
+    f.write((const uint8_t *)&HISTORY_FILE_VERSION, sizeof(HISTORY_FILE_VERSION));
+    f.write((const uint8_t *)&size, sizeof(size));
+    f.write((const uint8_t *)&h.count, sizeof(h.count));
+    f.write((const uint8_t *)&h.head, sizeof(h.head));
+    f.write((const uint8_t *)h.samples, sizeof(h.samples));
+    f.close();
+}
+
+static void loadHistoryFromSd(size_t idx) {
+    if (!g_sdReady) {
+        return;
+    }
+    String path = historyFilePath(idx);
+    if (!SD.exists(path)) {
+        return;
+    }
+    File f = SD.open(path, FILE_READ);
+    if (!f) {
+        Serial.printf("Failed to open %s for reading\n", path.c_str());
+        return;
+    }
+
+    uint32_t magic = 0;
+    uint16_t version = 0;
+    uint16_t size = 0;
+    History &h = g_history[idx];
+    bool ok = f.read((uint8_t *)&magic, sizeof(magic)) == sizeof(magic) &&
+              f.read((uint8_t *)&version, sizeof(version)) == sizeof(version) &&
+              f.read((uint8_t *)&size, sizeof(size)) == sizeof(size) &&
+              magic == HISTORY_FILE_MAGIC && version == HISTORY_FILE_VERSION && size == HISTORY_SIZE;
+    if (ok) {
+        ok = f.read((uint8_t *)&h.count, sizeof(h.count)) == sizeof(h.count) &&
+             f.read((uint8_t *)&h.head, sizeof(h.head)) == sizeof(h.head) &&
+             f.read((uint8_t *)h.samples, sizeof(h.samples)) == sizeof(h.samples);
+    }
+    f.close();
+
+    if (ok) {
+        Serial.printf("Loaded %u history sample(s) for %s from SD\n", (unsigned)h.count,
+                      KNOWN_DEVICES[idx].name);
+    } else {
+        // Missing/old-format/wrong-size file (e.g. HISTORY_SIZE changed since
+        // it was written) -- ignore it and start fresh rather than trusting
+        // whatever partial data was read.
+        Serial.printf("Ignoring incompatible history file for %s\n", KNOWN_DEVICES[idx].name);
+        h.count = 0;
+        h.head = 0;
+    }
+}
+
 static void recordHistory() {
     for (size_t i = 0; i < KNOWN_DEVICE_COUNT; i++) {
         if (!g_readings[i].valid) {
@@ -161,6 +249,7 @@ static void recordHistory() {
         if (h.count < HISTORY_SIZE) {
             h.count++;
         }
+        saveHistoryToSd(i);
     }
 }
 
@@ -367,13 +456,23 @@ static void checkBatteryLevel(size_t idx) {
 
 // ---------------------------------------------------------------------
 void setup() {
-    M5.begin();
+    M5.begin(); // also initializes the SD card (SDEnable defaults to true)
     Serial.begin(115200);
     delay(300);
     Serial.println("AC Infinity multi-device monitor (M5Stack) booting...");
     Serial.printf("Watching %u configured device(s):\n", (unsigned)KNOWN_DEVICE_COUNT);
     for (size_t i = 0; i < KNOWN_DEVICE_COUNT; i++) {
         Serial.printf("  %s -- %s\n", KNOWN_DEVICES[i].mac, KNOWN_DEVICES[i].name);
+    }
+
+    g_sdReady = SD.cardType() != CARD_NONE;
+    if (g_sdReady) {
+        Serial.println("SD card present -- history will persist across reboots");
+        for (size_t i = 0; i < KNOWN_DEVICE_COUNT; i++) {
+            loadHistoryFromSd(i);
+        }
+    } else {
+        Serial.println("No SD card found -- history will be RAM-only this session");
     }
 
     M5.Lcd.fillScreen(BLACK);

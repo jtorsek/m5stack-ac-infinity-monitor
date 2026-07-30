@@ -47,15 +47,21 @@ add a line here, and reflash -- no other code changes needed.
 ## History graph
 
 Each device gets its own ring buffer of one temperature sample per minute,
-holding the last 1440 samples (24 hours). At 4 bytes/sample that's under
-6KB of RAM per device -- negligible next to the M5Stack Core's 512KB, so
-there's no need to spill this onto the SD card even with several devices
-configured. It is RAM-only, though, so it doesn't survive a reboot -- it
-starts filling in again from scratch each time the board powers on, and
-the graph shows "Not enough history yet" until at least two samples have
-been recorded. The plotted line is downsampled to one point per pixel
-column, so it stays fast and legible regardless of how many samples are
-buffered.
+holding the last 1440 samples (24 hours). It lives in RAM (under 6KB per
+device -- negligible next to the M5Stack Core's 512KB), but is also
+mirrored to the SD card after every new sample and reloaded at boot, so a
+reboot or power cycle doesn't lose it. Each device gets its own file,
+named after its MAC address (e.g. `/hist_a4c1388e0533.bin`), so history
+stays matched to the right device even if `devices.h` is reordered later.
+
+If no SD card is inserted, the firmware detects that at boot, logs it,
+and simply runs with RAM-only history for that session -- no SD card is
+not treated as an error. If `HISTORY_SIZE` ever changes in a future
+firmware update, old files from a different size are detected (via a
+header written alongside the data) and ignored rather than misread.
+
+The plotted line is downsampled to one point per pixel column, so it
+stays fast and legible regardless of how many samples are buffered.
 
 ## Display cycling (live view)
 
@@ -81,6 +87,8 @@ pio run --target upload
   classic 3-button, ILI9341 320x240 form factor)
 - One or more AC Infinity CloudCom A1 devices (or others using the same
   "C_1B" advertisement layout) within BLE range
+- A microSD card (FAT32), optional -- only needed for history to survive
+  a reboot; the firmware runs fine without one, just without persistence
 
 ## Protocol notes
 
