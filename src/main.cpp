@@ -343,22 +343,42 @@ static void renderGraph() {
     const History &h = g_history[g_graphIndex];
     const KnownDevice &device = KNOWN_DEVICES[g_graphIndex];
 
-    M5.Lcd.fillScreen(BLACK);
-    M5.Lcd.setTextColor(CYAN, BLACK);
-    M5.Lcd.setTextFont(2);
-    M5.Lcd.setCursor(6, 6);
-    M5.Lcd.print(device.name);
-    M5.Lcd.setTextColor(DARKGREY, BLACK);
-    M5.Lcd.setCursor(6, 24);
-    M5.Lcd.print("Temperature, last 24 hours");
+    const uint16_t headerBg = M5.Lcd.color565(15, 25, 55);
+    const uint16_t gridColor = M5.Lcd.color565(45, 45, 45);
+    const uint16_t fillColor = M5.Lcd.color565(0, 45, 50);
+    const uint16_t lineColor = M5.Lcd.color565(0, 230, 200);
+    const uint16_t footerBg = M5.Lcd.color565(24, 24, 24);
 
-    const int plotX = 40, plotY = 46, plotW = 270, plotH = 140;
-    M5.Lcd.drawRect(plotX, plotY, plotW, plotH, DARKGREY);
+    M5.Lcd.fillScreen(BLACK);
+
+    // Header bar
+    M5.Lcd.fillRect(0, 0, 320, 22, headerBg);
+    M5.Lcd.setTextColor(WHITE, headerBg);
+    M5.Lcd.setTextFont(2);
+    M5.Lcd.setCursor(6, 4);
+    M5.Lcd.print(device.name);
+
+    char posBuf[16];
+    snprintf(posBuf, sizeof(posBuf), "(%u/%u)", (unsigned)(g_graphIndex + 1), (unsigned)KNOWN_DEVICE_COUNT);
+    int posWidth = M5.Lcd.textWidth(posBuf);
+    M5.Lcd.setTextColor(M5.Lcd.color565(150, 170, 200), headerBg);
+    M5.Lcd.setCursor(320 - 6 - posWidth, 4);
+    M5.Lcd.print(posBuf);
+
+    M5.Lcd.setTextColor(lineColor, BLACK);
+    M5.Lcd.setTextFont(1);
+    M5.Lcd.setCursor(6, 27);
+    M5.Lcd.print("TEMPERATURE - LAST 24 HOURS");
+
+    const int plotX = 34, plotY = 40, plotW = 276, plotH = 130;
+    const int plotBottom = plotY + plotH;
 
     if (h.count < 2) {
+        M5.Lcd.drawRect(plotX, plotY, plotW, plotH, gridColor);
         M5.Lcd.setTextColor(ORANGE, BLACK);
         M5.Lcd.setTextFont(2);
-        M5.Lcd.setCursor(plotX + 10, plotY + plotH / 2 - 8);
+        int msgWidth = M5.Lcd.textWidth("Not enough history yet");
+        M5.Lcd.setCursor(plotX + (plotW - msgWidth) / 2, plotY + plotH / 2 - 8);
         M5.Lcd.print("Not enough history yet");
     } else {
         float minT = 1000, maxT = -1000;
@@ -374,45 +394,94 @@ static void renderGraph() {
             maxT = mid + 0.5f;
         }
 
-        char buf[16];
-        M5.Lcd.setTextFont(1);
-        M5.Lcd.setTextColor(DARKGREY, BLACK);
-        snprintf(buf, sizeof(buf), "%.1f", maxT);
-        M5.Lcd.setCursor(2, plotY);
-        M5.Lcd.print(buf);
-        snprintf(buf, sizeof(buf), "%.1f", minT);
-        M5.Lcd.setCursor(2, plotY + plotH - 8);
-        M5.Lcd.print(buf);
+        // Gridlines -- 3 horizontal (quarter, half, three-quarter height) and
+        // 3 vertical (6h/12h/18h marks), drawn before the data so the curve
+        // and fill sit on top.
+        for (int i = 1; i <= 3; i++) {
+            int gy = plotY + plotH * i / 4;
+            M5.Lcd.drawFastHLine(plotX, gy, plotW, gridColor);
+        }
+        for (int i = 1; i <= 3; i++) {
+            int gx = plotX + plotW * i / 4;
+            M5.Lcd.drawFastVLine(gx, plotY, plotH, gridColor);
+        }
+        M5.Lcd.drawRect(plotX, plotY, plotW, plotH, gridColor);
+
+        auto valueToY = [&](float v) {
+            return plotBottom - (int)((v - minT) / (maxT - minT) * plotH);
+        };
 
         // Downsample to one point per pixel column so plotting stays fast
         // and legible regardless of how many samples are buffered (up to
         // HISTORY_SIZE for a full 24h at 1-minute resolution).
-        int prevX = -1, prevY = -1;
+        int prevX = -1, prevY = -1, lastX = -1, lastY = -1;
         for (int col = 0; col < plotW; col++) {
             uint16_t sampleIdx = (uint32_t)col * (h.count - 1) / (plotW - 1);
             uint16_t idx = (h.head + HISTORY_SIZE - h.count + sampleIdx) % HISTORY_SIZE;
             float v = h.samples[idx];
             int x = plotX + col;
-            int y = plotY + plotH - (int)((v - minT) / (maxT - minT) * plotH);
+            int y = valueToY(v);
+
+            // Filled area under the curve, drawn one column at a time.
+            M5.Lcd.drawFastVLine(x, y, plotBottom - y, fillColor);
+
             if (prevX >= 0) {
-                M5.Lcd.drawLine(prevX, prevY, x, y, GREEN);
+                M5.Lcd.drawLine(prevX, prevY, x, y, lineColor);
+                M5.Lcd.drawLine(prevX, prevY - 1, x, y - 1, lineColor);
             }
             prevX = x;
             prevY = y;
+            lastX = x;
+            lastY = y;
         }
+
+        // Highlight the most recent reading.
+        M5.Lcd.fillCircle(lastX, lastY, 3, WHITE);
+        char nowBuf[16];
+        snprintf(nowBuf, sizeof(nowBuf), "%.1fC", h.samples[(h.head + HISTORY_SIZE - 1) % HISTORY_SIZE]);
+        int nowLabelWidth = M5.Lcd.textWidth(nowBuf);
+        int labelX = lastX - nowLabelWidth - 4;
+        if (labelX < plotX) {
+            labelX = lastX + 6;
+        }
+        int labelY = (lastY - plotY < 14) ? lastY + 4 : lastY - 14;
+        M5.Lcd.setTextColor(WHITE, BLACK);
+        M5.Lcd.setTextFont(1);
+        M5.Lcd.setCursor(labelX, labelY);
+        M5.Lcd.print(nowBuf);
+
+        char buf[16];
+        M5.Lcd.setTextFont(1);
+        M5.Lcd.setTextColor(DARKGREY, BLACK);
+        snprintf(buf, sizeof(buf), "%.1f", maxT);
+        M5.Lcd.setCursor(2, plotY - 2);
+        M5.Lcd.print(buf);
+        snprintf(buf, sizeof(buf), "%.1f", minT);
+        M5.Lcd.setCursor(2, plotBottom - 6);
+        M5.Lcd.print(buf);
     }
 
     M5.Lcd.setTextColor(DARKGREY, BLACK);
     M5.Lcd.setTextFont(1);
-    M5.Lcd.setCursor(plotX, plotY + plotH + 4);
+    M5.Lcd.setCursor(plotX, plotBottom + 4);
     M5.Lcd.print("-24h");
+    M5.Lcd.setCursor(plotX + plotW / 2 - 8, plotBottom + 4);
+    M5.Lcd.print("-12h");
     const char *nowLabel = "now";
     int nowWidth = M5.Lcd.textWidth(nowLabel);
-    M5.Lcd.setCursor(plotX + plotW - nowWidth, plotY + plotH + 4);
+    M5.Lcd.setCursor(plotX + plotW - nowWidth, plotBottom + 4);
     M5.Lcd.print(nowLabel);
 
-    M5.Lcd.setCursor(6, 224);
-    M5.Lcd.print("A: back   B: prev device   C: next device");
+    // Footer control bar
+    M5.Lcd.fillRect(0, 220, 320, 20, footerBg);
+    M5.Lcd.setTextColor(M5.Lcd.color565(120, 220, 200), footerBg);
+    M5.Lcd.setTextFont(1);
+    M5.Lcd.setCursor(10, 226);
+    M5.Lcd.print("[A] Back");
+    M5.Lcd.setCursor(130, 226);
+    M5.Lcd.print("[B] Prev device");
+    M5.Lcd.setCursor(230, 226);
+    M5.Lcd.print("[C] Next device");
 }
 
 // ---------------------------------------------------------------------
