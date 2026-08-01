@@ -264,15 +264,21 @@ static const uint32_t LOST_SIGNAL_AFTER_MS = 10000;
 static bool g_graphMode = false;
 static size_t g_graphIndex = 0;
 
-static void drawValue(int x, int y, const char *label, const char *value, uint16_t color) {
-    M5.Lcd.setTextColor(DARKGREY, BLACK);
+static void drawCard(int x, int y, int w, int h, const char *label, const char *value, uint16_t accent) {
+    const uint16_t cardBg = M5.Lcd.color565(15, 20, 30);
+    const uint16_t cardBorder = M5.Lcd.color565(40, 55, 70);
+
+    M5.Lcd.fillRoundRect(x, y, w, h, 6, cardBg);
+    M5.Lcd.drawRoundRect(x, y, w, h, 6, cardBorder);
+
+    M5.Lcd.setTextColor(M5.Lcd.color565(140, 160, 180), cardBg);
     M5.Lcd.setTextFont(2);
-    M5.Lcd.setCursor(x, y);
+    M5.Lcd.setCursor(x + 8, y + 6);
     M5.Lcd.print(label);
 
-    M5.Lcd.setTextColor(color, BLACK);
+    M5.Lcd.setTextColor(accent, cardBg);
     M5.Lcd.setTextFont(4);
-    M5.Lcd.setCursor(x, y + 18);
+    M5.Lcd.setCursor(x + 8, y + 36);
     M5.Lcd.print(value);
 }
 
@@ -280,63 +286,88 @@ static void renderLive() {
     const AcInfinityReading &reading = g_readings[g_displayIndex];
     const KnownDevice &device = KNOWN_DEVICES[g_displayIndex];
 
+    const uint16_t headerBg = M5.Lcd.color565(15, 25, 55);
+    const uint16_t footerBg = M5.Lcd.color565(24, 24, 24);
+    const uint16_t accentTeal = M5.Lcd.color565(0, 230, 200);
+    const uint16_t accentOrange = M5.Lcd.color565(255, 170, 80);
+    const uint16_t accentBlue = M5.Lcd.color565(120, 180, 255);
+    const uint16_t accentGreen = M5.Lcd.color565(150, 220, 150);
+
     M5.Lcd.fillScreen(BLACK);
 
-    M5.Lcd.setTextColor(CYAN, BLACK);
+    // Header bar
+    M5.Lcd.fillRect(0, 0, 320, 22, headerBg);
+    M5.Lcd.setTextColor(WHITE, headerBg);
     M5.Lcd.setTextFont(2);
-    M5.Lcd.setCursor(6, 6);
+    M5.Lcd.setCursor(6, 4);
     M5.Lcd.print(device.name);
 
     char posBuf[16];
     snprintf(posBuf, sizeof(posBuf), "(%u/%u)", (unsigned)(g_displayIndex + 1), (unsigned)KNOWN_DEVICE_COUNT);
     int posWidth = M5.Lcd.textWidth(posBuf);
-    M5.Lcd.setTextColor(DARKGREY, BLACK);
-    M5.Lcd.setCursor(320 - 6 - posWidth, 6);
+    M5.Lcd.setTextColor(M5.Lcd.color565(150, 170, 200), headerBg);
+    M5.Lcd.setCursor(320 - 6 - posWidth, 4);
     M5.Lcd.print(posBuf);
 
     if (!reading.valid) {
-        M5.Lcd.setTextFont(2);
         M5.Lcd.setTextColor(ORANGE, BLACK);
-        M5.Lcd.setCursor(6, 40);
-        M5.Lcd.print("Waiting for signal...");
-    } else if (millis() - reading.lastUpdateMs > LOST_SIGNAL_AFTER_MS) {
         M5.Lcd.setTextFont(2);
+        const char *msg = "Waiting for signal...";
+        int msgWidth = M5.Lcd.textWidth(msg);
+        M5.Lcd.setCursor((320 - msgWidth) / 2, 110);
+        M5.Lcd.print(msg);
+    } else if (millis() - reading.lastUpdateMs > LOST_SIGNAL_AFTER_MS) {
         M5.Lcd.setTextColor(RED, BLACK);
-        M5.Lcd.setCursor(6, 40);
-        M5.Lcd.print("Lost signal, retrying...");
+        M5.Lcd.setTextFont(2);
+        const char *msg = "Lost signal, retrying...";
+        int msgWidth = M5.Lcd.textWidth(msg);
+        M5.Lcd.setCursor((320 - msgWidth) / 2, 110);
+        M5.Lcd.print(msg);
     } else {
+        uint32_t ageSec = (millis() - reading.lastUpdateMs) / 1000;
+        char statusBuf[32];
+        snprintf(statusBuf, sizeof(statusBuf), "LIVE - %lus ago - %d dBm", (unsigned long)ageSec, reading.rssi);
+        M5.Lcd.setTextColor(accentTeal, BLACK);
+        M5.Lcd.setTextFont(1);
+        M5.Lcd.setCursor(6, 27);
+        M5.Lcd.print(statusBuf);
+
         char buf[32];
-        const int col1 = 6, col2 = 168;
-        int y = 34;
+        const int margin = 8;
+        const int tileW = (320 - margin * 3) / 2;
+        const int tileH = 77;
+        const int row1Y = 40;
+        const int row2Y = row1Y + tileH + margin;
+        const int col1X = margin;
+        const int col2X = margin * 2 + tileW;
 
         snprintf(buf, sizeof(buf), "%.1f C", reading.temperatureC);
-        drawValue(col1, y, "Temperature", buf, WHITE);
+        drawCard(col1X, row1Y, tileW, tileH, "TEMPERATURE", buf, accentOrange);
 
         snprintf(buf, sizeof(buf), "%.1f %%", reading.humidityPct);
-        drawValue(col2, y, "Humidity", buf, WHITE);
+        drawCard(col2X, row1Y, tileW, tileH, "HUMIDITY", buf, accentBlue);
 
-        y += 60;
         snprintf(buf, sizeof(buf), "%.2f kPa", reading.vpdKpa);
-        drawValue(col1, y, "VPD", buf, WHITE);
+        drawCard(col1X, row2Y, tileW, tileH, "VPD", buf, accentTeal);
 
+        uint16_t batteryAccent = accentGreen;
         if (g_batteryValid[g_displayIndex]) {
             snprintf(buf, sizeof(buf), "%d %%", g_batteryPct[g_displayIndex]);
-            drawValue(col2, y, "Battery", buf, g_batteryPct[g_displayIndex] <= 20 ? ORANGE : WHITE);
+            batteryAccent = g_batteryPct[g_displayIndex] <= 20 ? ORANGE : accentGreen;
+        } else {
+            snprintf(buf, sizeof(buf), "--");
         }
-
-        y += 60;
-        uint32_t ageSec = (millis() - reading.lastUpdateMs) / 1000;
-        snprintf(buf, sizeof(buf), "live, %lus ago, %d dBm", (unsigned long)ageSec, reading.rssi);
-        M5.Lcd.setTextColor(DARKGREY, BLACK);
-        M5.Lcd.setTextFont(2);
-        M5.Lcd.setCursor(6, y);
-        M5.Lcd.print(buf);
+        drawCard(col2X, row2Y, tileW, tileH, "BATTERY", buf, batteryAccent);
     }
 
-    M5.Lcd.setTextColor(DARKGREY, BLACK);
+    // Footer control bar
+    M5.Lcd.fillRect(0, 220, 320, 20, footerBg);
+    M5.Lcd.setTextColor(accentTeal, footerBg);
     M5.Lcd.setTextFont(1);
-    M5.Lcd.setCursor(6, 224);
-    M5.Lcd.print("A: history graph   B/C: select sensor");
+    M5.Lcd.setCursor(10, 226);
+    M5.Lcd.print("[A] Graph");
+    M5.Lcd.setCursor(140, 226);
+    M5.Lcd.print("[B/C] Select sensor");
 }
 
 static void renderGraph() {
