@@ -1,6 +1,10 @@
 # PlatformIO build artifacts
 .pio/
 
+# Real WiFi/OTA credentials -- copy include/config.h.example to
+# include/config.h and fill in
+include/config.h
+
 # Claude Code local settings
 .claude/
 

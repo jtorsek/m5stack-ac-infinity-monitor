@@ -28,8 +28,12 @@ static const KnownDevice KNOWN_DEVICES[] = {
     {"a4:c1:38:82:a3:9a", 0, "Sniffer -Bleu.io"},
     {"a4:c1:38:0f:7f:15", 0, "Kontoret"},
     {"a4:c1:38:33:f5:be", 0, "Kylskapet"},
+    {"a4:c1:38:fc:9d:04", 0, "Svamplådan"},
 };
 ```
+
+Names can use å/ä/ö/Å/Ä/Ö (or any other UTF-8 text) -- see "Character
+rendering" below for how that works.
 
 To add a new device, find its MAC address with
 `ac_infinity_bleuio_scanner.py --watch` from the ac-infinity-bleuio repo,
@@ -80,6 +84,44 @@ stays fast and legible regardless of how many samples are buffered.
   seconds shows "Lost signal, retrying..." -- this is purely a per-device
   display state; the scan itself keeps running continuously for all
   devices in the background.
+
+## Character rendering
+
+All text is drawn via [U8g2_for_Adafruit_GFX](https://github.com/olikraus/U8g2_for_Adafruit_GFX)
+instead of M5Stack's/TFT_eSPI's own fonts -- those built-in fonts are
+ASCII-only, so å/ä/ö (and any other non-ASCII text) would come out as
+missing or garbled characters. `TFTGFXAdapter` in `src/main.cpp` is the
+minimal bridge that lets U8g2 draw onto `M5.Lcd` (an `M5Display`, which
+is itself a `TFT_eSPI`) rather than switching the whole UI to
+Adafruit_GFX. Same fix as in the (unrelated) zaptec-cyd-charger project.
+
+## WiFi + OTA updates
+
+Connects to WiFi at boot (best-effort, with a 10s timeout) so firmware
+can be updated wirelessly afterwards -- BLE scanning, the SD card, and
+the display all work identically with no WiFi at all, and a
+failed/missing connection is logged, not treated as an error. To enable
+it:
+
+1. Copy `include/config.h.example` to `include/config.h` and fill in your
+   WiFi SSID/password and an OTA password (`config.h` is gitignored --
+   never commit real credentials).
+2. Flash once over USB as usual so the new firmware (with WiFi/OTA
+   support) is running.
+3. From then on, update over WiFi instead of USB:
+   ```bash
+   OTA_PASSWORD=<same value as in config.h> pio run -e m5stack_ota -t upload
+   ```
+   Reachable at `ac-infinity-m5stack.local` (or whatever `OTA_HOSTNAME` is
+   set to) once it's on the network.
+
+This board's own default partition table is sized for 4MB flash (each
+OTA app slot only ~1.3MB) even though it has 16MB -- `platformio.ini`
+overrides it with `default_16MB.csv` so each OTA slot gets ~6.25MB
+instead, comfortably fitting the firmware (~1.2MB) with room to grow.
+Changing the partition table needs a full reflash over USB (not OTA) to
+take effect, since it's already baked into this repo's `platformio.ini`
+that's a one-time thing, not something you'll hit again.
 
 ## Build and flash
 

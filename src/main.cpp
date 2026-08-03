@@ -14,6 +14,19 @@
  *     (pauses auto-cycling once you've picked one manually) and in graph
  *     mode (switches whose history is plotted).
  *
+ * Text is drawn via U8g2_for_Adafruit_GFX instead of M5Stack's own fonts
+ * -- TFT_eSPI's (and so M5Stack's) built-in fonts are ASCII-only (no
+ * å/ä/ö), which U8g2's fonts include, so device names in devices.h can
+ * use proper Swedish spelling. Same fix as in the zaptec-cyd-charger
+ * project; see TFTGFXAdapter below for the minimal bridge that makes
+ * U8g2 draw onto M5.Lcd (an M5Display, which is itself a TFT_eSPI)
+ * instead of switching the whole UI to Adafruit_GFX.
+ *
+ * Also connects to WiFi (best-effort, non-fatal if it fails or isn't
+ * configured) to serve OTA firmware updates -- see include/config.h.example
+ * and the m5stack_ota environment in platformio.ini. BLE scanning, the SD
+ * card, and the display all work fine with no WiFi at all.
+ *
  * History is a 1-sample-per-minute ring buffer per device, holding the
  * last 24 hours (1440 points). It lives in RAM but is mirrored to the SD
  * card (one file per device, keyed by MAC address) after every new
@@ -30,8 +43,13 @@
 #include <M5Stack.h>
 #include <NimBLEDevice.h>
 #include <SD.h>
+#include <Adafruit_GFX.h>
+#include <U8g2_for_Adafruit_GFX.h>
+#include <WiFi.h>
+#include <ArduinoOTA.h>
 #include <math.h>
 #include "devices.h"
+#include "config.h"
 
 static_assert(KNOWN_DEVICE_COUNT > 0, "Add at least one device to include/devices.h");
 
@@ -256,6 +274,65 @@ static void recordHistory() {
 // ---------------------------------------------------------------------
 // Display -- live cycling mode + history graph mode (button A toggles).
 // ---------------------------------------------------------------------
+
+// U8g2_for_Adafruit_GFX needs an Adafruit_GFX-derived object to call
+// drawPixel() on, but this project draws with M5.Lcd (a TFT_eSPI
+// subclass) directly everywhere else. This adapter is the minimal
+// bridge: it forwards the one method U8g2_for_Adafruit_GFX actually
+// calls to M5.Lcd, so we get U8g2's fonts (which include Swedish
+// å/ä/ö/Å/Ä/Ö, unlike TFT_eSPI's built-in fonts) without switching the
+// rest of the UI off M5.Lcd.
+class TFTGFXAdapter : public Adafruit_GFX {
+public:
+    TFTGFXAdapter(TFT_eSPI &tft, int16_t w, int16_t h) : Adafruit_GFX(w, h), _tft(tft) {}
+    void drawPixel(int16_t x, int16_t y, uint16_t color) override { _tft.drawPixel(x, y, color); }
+
+private:
+    TFT_eSPI &_tft;
+};
+
+static TFTGFXAdapter gfxAdapter(M5.Lcd, 320, 240);
+static U8G2_FOR_ADAFRUIT_GFX u8g2Fonts;
+
+static const uint8_t *kFontTiny = u8g2_font_helvR08_tf;   // status bar, footer, axis labels
+static const uint8_t *kFontSmall = u8g2_font_helvR12_tf;  // header, card labels, messages
+static const uint8_t *kFontLarge = u8g2_font_helvR18_tf;  // card values
+
+enum class Datum { TopLeft, MiddleCenter };
+
+// Draws `text` positioned like TFT_eSPI's setTextDatum() did: TopLeft
+// means (x,y) is the text's top-left corner, MiddleCenter means (x,y) is
+// its center -- but via u8g2Fonts, so Swedish characters render
+// correctly. `bg` must match whatever surface the text sits on (u8g2's
+// "transparent" font mode did not reliably skip painting the glyph
+// background in this setup, so every draw is explicitly opaque with a
+// matching background color instead).
+static void drawText(const String &text, int x, int y, const uint8_t *font, uint16_t color,
+                      uint16_t bg, Datum datum = Datum::TopLeft) {
+    u8g2Fonts.setFont(font);
+    u8g2Fonts.setForegroundColor(color);
+    u8g2Fonts.setBackgroundColor(bg);
+
+    int ascent = u8g2Fonts.getFontAscent();
+    int descent = u8g2Fonts.getFontDescent(); // negative
+
+    int drawX = x, drawY = y;
+    if (datum == Datum::TopLeft) {
+        drawY = y + ascent;
+    } else {
+        int w = u8g2Fonts.getUTF8Width(text.c_str());
+        drawX = x - w / 2;
+        drawY = y + (ascent + descent) / 2;
+    }
+    u8g2Fonts.setCursor(drawX, drawY);
+    u8g2Fonts.print(text);
+}
+
+static int textWidth(const char *text, const uint8_t *font) {
+    u8g2Fonts.setFont(font);
+    return u8g2Fonts.getUTF8Width(text);
+}
+
 static const uint32_t DISPLAY_CYCLE_MS = 5000;
 static size_t g_displayIndex = 0;
 static uint32_t g_displaySwitchedAtMs = 0;
@@ -271,15 +348,8 @@ static void drawCard(int x, int y, int w, int h, const char *label, const char *
     M5.Lcd.fillRoundRect(x, y, w, h, 6, cardBg);
     M5.Lcd.drawRoundRect(x, y, w, h, 6, cardBorder);
 
-    M5.Lcd.setTextColor(M5.Lcd.color565(140, 160, 180), cardBg);
-    M5.Lcd.setTextFont(2);
-    M5.Lcd.setCursor(x + 8, y + 6);
-    M5.Lcd.print(label);
-
-    M5.Lcd.setTextColor(accent, cardBg);
-    M5.Lcd.setTextFont(4);
-    M5.Lcd.setCursor(x + 8, y + 36);
-    M5.Lcd.print(value);
+    drawText(label, x + 8, y + 4, kFontSmall, M5.Lcd.color565(140, 160, 180), cardBg);
+    drawText(value, x + 8, y + 30, kFontLarge, accent, cardBg);
 }
 
 static void renderLive() {
@@ -297,46 +367,32 @@ static void renderLive() {
 
     // Header bar
     M5.Lcd.fillRect(0, 0, 320, 22, headerBg);
-    M5.Lcd.setTextColor(WHITE, headerBg);
-    M5.Lcd.setTextFont(2);
-    M5.Lcd.setCursor(6, 4);
-    M5.Lcd.print(device.name);
+    drawText(device.name, 6, 4, kFontSmall, WHITE, headerBg);
 
     char posBuf[16];
     snprintf(posBuf, sizeof(posBuf), "(%u/%u)", (unsigned)(g_displayIndex + 1), (unsigned)KNOWN_DEVICE_COUNT);
-    int posWidth = M5.Lcd.textWidth(posBuf);
-    M5.Lcd.setTextColor(M5.Lcd.color565(150, 170, 200), headerBg);
-    M5.Lcd.setCursor(320 - 6 - posWidth, 4);
-    M5.Lcd.print(posBuf);
+    int posWidth = textWidth(posBuf, kFontSmall);
+    drawText(posBuf, 320 - 6 - posWidth, 4, kFontSmall, M5.Lcd.color565(150, 170, 200), headerBg);
 
     if (!reading.valid) {
-        M5.Lcd.setTextColor(ORANGE, BLACK);
-        M5.Lcd.setTextFont(2);
         const char *msg = "Waiting for signal...";
-        int msgWidth = M5.Lcd.textWidth(msg);
-        M5.Lcd.setCursor((320 - msgWidth) / 2, 110);
-        M5.Lcd.print(msg);
+        int msgWidth = textWidth(msg, kFontSmall);
+        drawText(msg, (320 - msgWidth) / 2, 100, kFontSmall, ORANGE, BLACK);
     } else if (millis() - reading.lastUpdateMs > LOST_SIGNAL_AFTER_MS) {
-        M5.Lcd.setTextColor(RED, BLACK);
-        M5.Lcd.setTextFont(2);
         const char *msg = "Lost signal, retrying...";
-        int msgWidth = M5.Lcd.textWidth(msg);
-        M5.Lcd.setCursor((320 - msgWidth) / 2, 110);
-        M5.Lcd.print(msg);
+        int msgWidth = textWidth(msg, kFontSmall);
+        drawText(msg, (320 - msgWidth) / 2, 100, kFontSmall, RED, BLACK);
     } else {
         uint32_t ageSec = (millis() - reading.lastUpdateMs) / 1000;
         char statusBuf[32];
         snprintf(statusBuf, sizeof(statusBuf), "LIVE - %lus ago - %d dBm", (unsigned long)ageSec, reading.rssi);
-        M5.Lcd.setTextColor(accentTeal, BLACK);
-        M5.Lcd.setTextFont(1);
-        M5.Lcd.setCursor(6, 27);
-        M5.Lcd.print(statusBuf);
+        drawText(statusBuf, 6, 25, kFontTiny, accentTeal, BLACK);
 
         char buf[32];
         const int margin = 8;
         const int tileW = (320 - margin * 3) / 2;
-        const int tileH = 77;
-        const int row1Y = 40;
+        const int tileH = 68;
+        const int row1Y = 38;
         const int row2Y = row1Y + tileH + margin;
         const int col1X = margin;
         const int col2X = margin * 2 + tileW;
@@ -362,12 +418,8 @@ static void renderLive() {
 
     // Footer control bar
     M5.Lcd.fillRect(0, 220, 320, 20, footerBg);
-    M5.Lcd.setTextColor(accentTeal, footerBg);
-    M5.Lcd.setTextFont(1);
-    M5.Lcd.setCursor(10, 226);
-    M5.Lcd.print("[A] Graph");
-    M5.Lcd.setCursor(140, 226);
-    M5.Lcd.print("[B/C] Select sensor");
+    drawText("[A] Graph", 10, 224, kFontTiny, accentTeal, footerBg);
+    drawText("[B/C] Select sensor", 140, 224, kFontTiny, accentTeal, footerBg);
 }
 
 static void renderGraph() {
@@ -384,33 +436,23 @@ static void renderGraph() {
 
     // Header bar
     M5.Lcd.fillRect(0, 0, 320, 22, headerBg);
-    M5.Lcd.setTextColor(WHITE, headerBg);
-    M5.Lcd.setTextFont(2);
-    M5.Lcd.setCursor(6, 4);
-    M5.Lcd.print(device.name);
+    drawText(device.name, 6, 4, kFontSmall, WHITE, headerBg);
 
     char posBuf[16];
     snprintf(posBuf, sizeof(posBuf), "(%u/%u)", (unsigned)(g_graphIndex + 1), (unsigned)KNOWN_DEVICE_COUNT);
-    int posWidth = M5.Lcd.textWidth(posBuf);
-    M5.Lcd.setTextColor(M5.Lcd.color565(150, 170, 200), headerBg);
-    M5.Lcd.setCursor(320 - 6 - posWidth, 4);
-    M5.Lcd.print(posBuf);
+    int posWidth = textWidth(posBuf, kFontSmall);
+    drawText(posBuf, 320 - 6 - posWidth, 4, kFontSmall, M5.Lcd.color565(150, 170, 200), headerBg);
 
-    M5.Lcd.setTextColor(lineColor, BLACK);
-    M5.Lcd.setTextFont(1);
-    M5.Lcd.setCursor(6, 27);
-    M5.Lcd.print("TEMPERATURE - LAST 24 HOURS");
+    drawText("TEMPERATURE - LAST 24 HOURS", 6, 25, kFontTiny, lineColor, BLACK);
 
     const int plotX = 34, plotY = 40, plotW = 276, plotH = 130;
     const int plotBottom = plotY + plotH;
 
     if (h.count < 2) {
         M5.Lcd.drawRect(plotX, plotY, plotW, plotH, gridColor);
-        M5.Lcd.setTextColor(ORANGE, BLACK);
-        M5.Lcd.setTextFont(2);
-        int msgWidth = M5.Lcd.textWidth("Not enough history yet");
-        M5.Lcd.setCursor(plotX + (plotW - msgWidth) / 2, plotY + plotH / 2 - 8);
-        M5.Lcd.print("Not enough history yet");
+        const char *msg = "Not enough history yet";
+        int msgWidth = textWidth(msg, kFontSmall);
+        drawText(msg, plotX + (plotW - msgWidth) / 2, plotY + plotH / 2 - 8, kFontSmall, ORANGE, BLACK);
     } else {
         float minT = 1000, maxT = -1000;
         for (uint16_t i = 0; i < h.count; i++) {
@@ -470,49 +512,32 @@ static void renderGraph() {
         M5.Lcd.fillCircle(lastX, lastY, 3, WHITE);
         char nowBuf[16];
         snprintf(nowBuf, sizeof(nowBuf), "%.1fC", h.samples[(h.head + HISTORY_SIZE - 1) % HISTORY_SIZE]);
-        int nowLabelWidth = M5.Lcd.textWidth(nowBuf);
+        int nowLabelWidth = textWidth(nowBuf, kFontTiny);
         int labelX = lastX - nowLabelWidth - 4;
         if (labelX < plotX) {
             labelX = lastX + 6;
         }
         int labelY = (lastY - plotY < 14) ? lastY + 4 : lastY - 14;
-        M5.Lcd.setTextColor(WHITE, BLACK);
-        M5.Lcd.setTextFont(1);
-        M5.Lcd.setCursor(labelX, labelY);
-        M5.Lcd.print(nowBuf);
+        drawText(nowBuf, labelX, labelY, kFontTiny, WHITE, BLACK);
 
         char buf[16];
-        M5.Lcd.setTextFont(1);
-        M5.Lcd.setTextColor(DARKGREY, BLACK);
         snprintf(buf, sizeof(buf), "%.1f", maxT);
-        M5.Lcd.setCursor(2, plotY - 2);
-        M5.Lcd.print(buf);
+        drawText(buf, 2, plotY - 2, kFontTiny, DARKGREY, BLACK);
         snprintf(buf, sizeof(buf), "%.1f", minT);
-        M5.Lcd.setCursor(2, plotBottom - 6);
-        M5.Lcd.print(buf);
+        drawText(buf, 2, plotBottom - 6, kFontTiny, DARKGREY, BLACK);
     }
 
-    M5.Lcd.setTextColor(DARKGREY, BLACK);
-    M5.Lcd.setTextFont(1);
-    M5.Lcd.setCursor(plotX, plotBottom + 4);
-    M5.Lcd.print("-24h");
-    M5.Lcd.setCursor(plotX + plotW / 2 - 8, plotBottom + 4);
-    M5.Lcd.print("-12h");
+    drawText("-24h", plotX, plotBottom + 4, kFontTiny, DARKGREY, BLACK);
+    drawText("-12h", plotX + plotW / 2 - 8, plotBottom + 4, kFontTiny, DARKGREY, BLACK);
     const char *nowLabel = "now";
-    int nowWidth = M5.Lcd.textWidth(nowLabel);
-    M5.Lcd.setCursor(plotX + plotW - nowWidth, plotBottom + 4);
-    M5.Lcd.print(nowLabel);
+    int nowWidth = textWidth(nowLabel, kFontTiny);
+    drawText(nowLabel, plotX + plotW - nowWidth, plotBottom + 4, kFontTiny, DARKGREY, BLACK);
 
     // Footer control bar
     M5.Lcd.fillRect(0, 220, 320, 20, footerBg);
-    M5.Lcd.setTextColor(M5.Lcd.color565(120, 220, 200), footerBg);
-    M5.Lcd.setTextFont(1);
-    M5.Lcd.setCursor(10, 226);
-    M5.Lcd.print("[A] Back");
-    M5.Lcd.setCursor(130, 226);
-    M5.Lcd.print("[B] Prev device");
-    M5.Lcd.setCursor(230, 226);
-    M5.Lcd.print("[C] Next device");
+    drawText("[A] Back", 10, 224, kFontTiny, M5.Lcd.color565(120, 220, 200), footerBg);
+    drawText("[B] Prev device", 130, 224, kFontTiny, M5.Lcd.color565(120, 220, 200), footerBg);
+    drawText("[C] Next device", 230, 224, kFontTiny, M5.Lcd.color565(120, 220, 200), footerBg);
 }
 
 // ---------------------------------------------------------------------
@@ -555,6 +580,68 @@ static void checkBatteryLevel(size_t idx) {
 }
 
 // ---------------------------------------------------------------------
+// WiFi + OTA -- best-effort only. This device's job is BLE scanning and
+// display, which need neither; a missing/failed WiFi connection just
+// means no OTA updates until it's available, not an error.
+// ---------------------------------------------------------------------
+static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
+static const unsigned long WIFI_RETRY_INTERVAL_MS = 30000;
+static bool g_otaReady = false;
+static uint32_t g_lastWifiAttemptMs = 0;
+
+static void otaBegin() {
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+
+    ArduinoOTA.onStart([]() {
+        Serial.println("OTA: update starting");
+        M5.Lcd.fillScreen(BLACK);
+        drawText("Uppdaterar firmware...", 10, 110, kFontSmall, WHITE, BLACK);
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        static int lastPercent = -1;
+        int percent = total ? (int)((progress * 100UL) / total) : 0;
+        if (percent == lastPercent) {
+            return;
+        }
+        lastPercent = percent;
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%d%%", percent);
+        M5.Lcd.fillRect(0, 130, 320, 30, BLACK);
+        drawText(buf, 10, 130, kFontLarge, WHITE, BLACK);
+    });
+    ArduinoOTA.onEnd([]() { Serial.println("OTA: update complete, rebooting"); });
+    ArduinoOTA.onError([](ota_error_t error) { Serial.printf("OTA: error %u\n", error); });
+
+    ArduinoOTA.begin();
+    g_otaReady = true;
+    Serial.printf("OTA: ready as %s.local\n", OTA_HOSTNAME);
+}
+
+// Attempts a WiFi connection with a short timeout; never blocks for long
+// and is safe to call repeatedly (e.g. from loop() if the link drops).
+static void connectWifi() {
+    if (WiFi.status() == WL_CONNECTED) {
+        return;
+    }
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.printf("WiFi: connecting to \"%s\"...\n", WIFI_SSID);
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
+        delay(250);
+    }
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("WiFi: connection failed (timeout) -- continuing without it");
+        return;
+    }
+    Serial.printf("WiFi: connected, IP %s\n", WiFi.localIP().toString().c_str());
+    if (!g_otaReady) {
+        otaBegin();
+    }
+}
+
+// ---------------------------------------------------------------------
 void setup() {
     M5.begin(); // also initializes the SD card (SDEnable defaults to true)
     Serial.begin(115200);
@@ -564,6 +651,9 @@ void setup() {
     for (size_t i = 0; i < KNOWN_DEVICE_COUNT; i++) {
         Serial.printf("  %s -- %s\n", KNOWN_DEVICES[i].mac, KNOWN_DEVICES[i].name);
     }
+
+    u8g2Fonts.begin(gfxAdapter);
+    u8g2Fonts.setFontDirection(0);
 
     g_sdReady = SD.cardType() != CARD_NONE;
     if (!g_sdReady) {
@@ -586,6 +676,7 @@ void setup() {
     }
 
     M5.Lcd.fillScreen(BLACK);
+    connectWifi(); // best-effort; BLE scanning below doesn't depend on it
 
     NimBLEDevice::init("");
     g_scan = NimBLEDevice::getScan();
@@ -601,6 +692,13 @@ void setup() {
 
 void loop() {
     M5.update();
+
+    if (g_otaReady) {
+        ArduinoOTA.handle();
+    } else if (millis() - g_lastWifiAttemptMs > WIFI_RETRY_INTERVAL_MS) {
+        g_lastWifiAttemptMs = millis();
+        connectWifi();
+    }
 
     bool needsRedraw = false;
 

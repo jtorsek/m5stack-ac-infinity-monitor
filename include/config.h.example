@@ -1,0 +1,19 @@
+// Copy this file to config.h and fill in your own values.
+// config.h is gitignored -- never commit your real credentials.
+
+#pragma once
+
+// ---- WiFi (only used for OTA updates -- BLE scanning/display/SD work
+// without it; a failed/missing WiFi connection is not fatal) ----
+#define WIFI_SSID "your-wifi-name"
+#define WIFI_PASSWORD "your-wifi-password"
+
+// ---- OTA updates ----
+// Lets you flash new firmware over WiFi (no USB) with:
+//   OTA_PASSWORD=<same value as below> pio run -e m5stack_ota -t upload
+// Reachable at OTA_HOSTNAME.local once running. Anyone on your WiFi who
+// knows this password can push firmware, so pick a real one (not the
+// example below) -- it's not meant to be strong crypto, just to keep
+// randoms on the network from overwriting the device.
+#define OTA_HOSTNAME "ac-infinity-m5stack"
+#define OTA_PASSWORD "changeme"

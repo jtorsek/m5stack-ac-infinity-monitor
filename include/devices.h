@@ -24,7 +24,7 @@ static const KnownDevice KNOWN_DEVICES[] = {
     {"a4:c1:38:82:a3:9a", 0, "Sniffer -Bleu.io"},
     {"a4:c1:38:0f:7f:15", 0, "Kontoret"},
     {"a4:c1:38:33:f5:be", 0, "Kylskapet"},
-    {"a4:c1:38:fc:9d:04", 0, "Svamp ladan"},
+    {"a4:c1:38:fc:9d:04", 0, "Svamplådan"},
 };
 
 static const size_t KNOWN_DEVICE_COUNT = sizeof(KNOWN_DEVICES) / sizeof(KNOWN_DEVICES[0]);
